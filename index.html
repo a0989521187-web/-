@@ -1,170 +1,207 @@
-<!DOCTYPE html>
-<html lang="zh-TW">
+<!doctype html>
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI虛擬口紅試色</title>
-<style>
-  body {
-    font-family: Arial, sans-serif;
-    background: #fff0f6;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-  }
-  h1 {
-    color: #ff4d6d;
-    margin-top: 20px;
-  }
-  #photo-container {
-    position: relative;
-    margin: 20px 0;
-  }
-  #user-photo {
-    max-width: 300px;
-    border-radius: 10px;
-  }
-  #lip-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-  }
-  #color-palette {
-    display: flex;
-    gap: 10px;
-    margin-bottom: 30px;
-    overflow-x: auto;
-    padding: 10px;
-  }
-  .color-swatch {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    cursor: pointer;
-    border: 2px solid #fff;
-    flex-shrink: 0;
-  }
-  .recommended {
-    border: 3px solid #ff4d6d;
-  }
-  input[type=file] {
-    margin-bottom: 20px;
-  }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Face API Lip/Mouth Detection</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; background: #111; color: #eee; display:flex; flex-direction:column; align-items:center; gap:12px; min-height:100vh; margin:0; }
+    #container { position:relative; width:720px; max-width:90vw; }
+    video, canvas { width:100%; height:auto; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
+    #status { margin-top:8px; text-align:center; }
+    #controls { display:flex; gap:8px; }
+    button { padding:8px 12px; border-radius:6px; border: none; background:#2b6cb0; color:white; cursor:pointer; }
+    button.secondary { background:#4a5568; }
+    .info { margin-top:6px; font-size:14px; color:#cbd5e0; }
+  </style>
 </head>
 <body>
+  <h2>face-api.js — Mouth / Lip Landmark Detection</h2>
+  <div id="container">
+    <video id="video" autoplay muted playsinline></video>
+    <canvas id="overlay"></canvas>
+  </div>
 
-<h1>AI虛擬口紅試色</h1>
-<input type="file" id="photo-input" accept="image/*">
-<div id="photo-container">
-  <img id="user-photo" src="" alt="你的照片">
-  <canvas id="lip-overlay"></canvas>
-</div>
-<div id="color-palette">
-  <div class="color-swatch" style="background:#FF4D6D" data-color="#FF4D6D"></div>
-  <div class="color-swatch" style="background:#FF7F9C" data-color="#FF7F9C"></div>
-  <div class="color-swatch" style="background:#FF6F91" data-color="#FF6F91"></div>
-  <div class="color-swatch" style="background:#FF8C69" data-color="#FF8C69"></div>
-  <div class="color-swatch" style="background:#FF5E78" data-color="#FF5E78"></div>
-</div>
+  <div id="controls">
+    <button id="startBtn">Start Camera & Detect</button>
+    <button id="stopBtn" class="secondary">Stop</button>
+  </div>
 
-<script>
-const photoInput = document.getElementById('photo-input');
-const userPhoto = document.getElementById('user-photo');
-const lipCanvas = document.getElementById('lip-overlay');
-const ctx = lipCanvas.getContext('2d');
-const swatches = document.querySelectorAll('.color-swatch');
+  <div id="status">Model status: <span id="modelStatus">not loaded</span></div>
+  <div class="info">Tip: make sure the '/models' folder with face-api models is available at the site root. See comments in the HTML for required model files.</div>
 
-photoInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    userPhoto.src = reader.result;
-    userPhoto.onload = () => {
-      lipCanvas.width = userPhoto.width;
-      lipCanvas.height = userPhoto.height;
-      ctx.clearRect(0,0,lipCanvas.width, lipCanvas.height);
-      analyzeSkinColor();
+  <!--
+    Required model files (place them under /models):
+      - tiny_face_detector_model-weights_manifest.json (+ shard file)
+      - face_landmark_68_model-weights_manifest.json (+ shard files)
+
+    You can download the models from the face-api.js repository or a CDN and put them in /models.
+  -->
+
+  <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script>
+    // Elements
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const modelStatus = document.getElementById('modelStatus');
+
+    let stream = null;
+    let detectionInterval = null;
+
+    // Settings
+    const MODEL_URL = '/models'; // Ensure models are available here on your server
+    const INPUT_SIZE = 320; // tiny face detector input size
+
+    async function loadModels() {
+      modelStatus.textContent = 'loading...';
+      // We use Tiny Face Detector + 68-point landmark model for mouth landmarks (48-67)
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      modelStatus.textContent = 'loaded';
     }
-  };
-  reader.readAsDataURL(file);
-});
 
-swatches.forEach(swatch => {
-  swatch.addEventListener('click', () => {
-    const color = swatch.dataset.color;
-    drawLipOverlay(color);
-  });
-});
-
-function drawLipOverlay(color) {
-  if (!userPhoto.src) return;
-  ctx.clearRect(0,0,lipCanvas.width, lipCanvas.height);
-  ctx.fillStyle = color;
-  ctx.globalAlpha = 0.5;
-  const w = lipCanvas.width;
-  const h = lipCanvas.height;
-  ctx.beginPath();
-  ctx.moveTo(w*0.3, h*0.7);
-  ctx.bezierCurveTo(w*0.4, h*0.6, w*0.6, h*0.6, w*0.7, h*0.7);
-  ctx.bezierCurveTo(w*0.6, h*0.8, w*0.4, h*0.8, w*0.3, h*0.7);
-  ctx.fill();
-}
-
-function analyzeSkinColor() {
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  canvas.width = userPhoto.width;
-  canvas.height = userPhoto.height;
-  context.drawImage(userPhoto, 0, 0);
-  const imgData = context.getImageData(0, 0, canvas.width, canvas.height);
-  let r=0,g=0,b=0,count=0;
-
-  // 取中間區域做膚色分析
-  for(let y = canvas.height*0.3; y < canvas.height*0.7; y+=5){
-    for(let x = canvas.width*0.3; x < canvas.width*0.7; x+=5){
-      const i = (y*canvas.width + x)*4;
-      r += imgData.data[i];
-      g += imgData.data[i+1];
-      b += imgData.data[i+2];
-      count++;
+    async function startCamera() {
+      if (stream) return;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+      } catch (err) {
+        console.error('Could not start camera', err);
+        alert('Error accessing camera: ' + err.message);
+      }
     }
-  }
-  r = Math.floor(r/count);
-  g = Math.floor(g/count);
-  b = Math.floor(b/count);
 
-  // 判斷冷暖色
-  let skinTone = '';
-  if(r>g && r> b) skinTone = 'warm';
-  else if(b>r && b>g) skinTone = 'cool';
-  else skinTone = 'neutral';
+    function stopCamera() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      if (detectionInterval) {
+        clearInterval(detectionInterval);
+        detectionInterval = null;
+      }
+      const ctx = overlay.getContext('2d');
+      ctx && ctx.clearRect(0, 0, overlay.width, overlay.height);
+    }
 
-  recommendColors(skinTone);
-}
+    function drawMouth(ctx, mouthPoints) {
+      if (!mouthPoints || mouthPoints.length === 0) return;
+      ctx.save();
+      // Outer lip (48-59)
+      ctx.strokeStyle = 'rgba(0,200,80,0.95)';
+      ctx.lineWidth = Math.max(2, overlay.width / 360);
+      ctx.beginPath();
+      mouthPoints.slice(0, 12).forEach((p, i) => {
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
 
-function recommendColors(tone){
-  swatches.forEach(swatch => swatch.classList.remove('recommended'));
-  if(tone === 'warm') {
-    // 橘調/珊瑚色
-    swatches[3].classList.add('recommended');
-    swatches[4].classList.add('recommended');
-  } else if(tone === 'cool') {
-    // 藍調紅/莓果
-    swatches[0].classList.add('recommended');
-    swatches[2].classList.add('recommended');
-  } else {
-    // 中性色 → 全部推薦
-    swatches.forEach(s => s.classList.add('recommended'));
-  }
-}
-</script>
+      // Inner lip (60-67)
+      ctx.strokeStyle = 'rgba(255,80,80,0.95)';
+      ctx.beginPath();
+      mouthPoints.slice(12).forEach((p, i) => {
+        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
 
+      // Draw small dots for landmarks
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      mouthPoints.forEach(p => ctx.fillRect(p.x - 2, p.y - 2, 4, 4));
+      ctx.restore();
+    }
+
+    // Compute mouth openness ratio using inner lip points (62 upper inner lip, 66 lower inner lip in 1-based indexing)
+    // For 0-based index: inner lip indexes start at 60..67, so upper: 62 -> idx 62? To be safe we use averaged points.
+    function computeMouthOpenRatio(landmarks) {
+      // Use inner lip top (points 62 & 63) and inner lip bottom (points 66 & 65)
+      // 68-point model indexing (0-based): inner lip points 60..67
+      const inner = landmarks.slice(60, 68);
+      const top = averagePoints([inner[2], inner[3]]); // approx top inner
+      const bottom = averagePoints([inner[6], inner[5]]); // approx bottom inner
+      const vertical = distance(top, bottom);
+
+      // Normalize by interocular distance (distance between eyes) so ratio is invariant to scale
+      const leftEye = averagePoints(landmarks.slice(36, 42));
+      const rightEye = averagePoints(landmarks.slice(42, 48));
+      const interocular = distance(leftEye, rightEye);
+      const ratio = vertical / (interocular || 1);
+      return ratio;
+    }
+
+    function averagePoints(points) {
+      const r = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
+      return { x: r.x / points.length, y: r.y / points.length };
+    }
+
+    function distance(a, b) {
+      return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+
+    async function detectLoop() {
+      if (!video || video.paused || video.ended) return;
+      // use tiny face detector for speed
+      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: INPUT_SIZE, scoreThreshold: 0.5 });
+      const result = await faceapi.detectSingleFace(video, options).withFaceLandmarks(true);
+      const ctx = overlay.getContext('2d');
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+      if (result && result.landmarks) {
+        const landmarks = result.landmarks.positions; // array of {x,y}
+        // draw mouth
+        const mouthPoints = landmarks.slice(48, 68); // 48..67
+        drawMouth(ctx, mouthPoints);
+
+        // compute openness
+        const openness = computeMouthOpenRatio(landmarks);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = '18px Arial';
+        ctx.fillText('Mouth openness: ' + openness.toFixed(3), 10, 24);
+
+        // Simple speaking detection threshold (tune as needed)
+        const speaking = openness > 0.035;
+        ctx.fillStyle = speaking ? 'rgba(0,200,80,0.9)' : 'rgba(200,80,80,0.9)';
+        ctx.fillText('Speaking: ' + (speaking ? 'yes' : 'no'), 10, 48);
+      } else {
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = '16px Arial';
+        ctx.fillText('No face detected', 10, 24);
+      }
+    }
+
+    async function startDetection() {
+      await loadModels();
+      await startCamera();
+      // Ensure overlay matches video size
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+
+      // Run detection on an interval for stability and CPU control
+      detectionInterval = setInterval(detectLoop, 100); // 10 FPS
+    }
+
+    // Event listeners
+    startBtn.addEventListener('click', () => {
+      startDetection().catch(err => console.error(err));
+    });
+
+    stopBtn.addEventListener('click', () => {
+      stopCamera();
+      modelStatus.textContent = 'stopped';
+    });
+
+    // helper: adjust canvas when video dimensions change (e.g. mobile rotate)
+    video.addEventListener('loadedmetadata', () => {
+      overlay.width = video.videoWidth;
+      overlay.height = video.videoHeight;
+    });
+
+  </script>
 </body>
 </html>
