@@ -1,207 +1,126 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="zh-TW">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Face API Lip/Mouth Detection</title>
-  <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; background: #111; color: #eee; display:flex; flex-direction:column; align-items:center; gap:12px; min-height:100vh; margin:0; }
-    #container { position:relative; width:720px; max-width:90vw; }
-    video, canvas { width:100%; height:auto; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
-    #status { margin-top:8px; text-align:center; }
-    #controls { display:flex; gap:8px; }
-    button { padding:8px 12px; border-radius:6px; border: none; background:#2b6cb0; color:white; cursor:pointer; }
-    button.secondary { background:#4a5568; }
-    .info { margin-top:6px; font-size:14px; color:#cbd5e0; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI虛擬口紅試色（Face API 即時偵測）</title>
+<script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; background: #fff0f6; margin:0; padding:20px; display:flex; flex-direction:column; align-items:center; }
+  h1 { color:#ff4d6d; }
+  #container{ position:relative; width:720px; max-width:95vw; }
+  video, canvas{ width:100%; height:auto; border-radius:8px; display:block; }
+  #controls{ margin-top:12px; display:flex; gap:8px; }
+  button{ padding:8px 12px; border-radius:6px; border:none; background:#ff4d6d; color:#fff; cursor:pointer; }
+  button.secondary{ background:#4a5568; }
+  #status{ margin-top:8px; }
+</style>
 </head>
 <body>
-  <h2>face-api.js — Mouth / Lip Landmark Detection</h2>
+  <h1>AI虛擬口紅試色（Face API 即時偵測）</h1>
   <div id="container">
     <video id="video" autoplay muted playsinline></video>
     <canvas id="overlay"></canvas>
   </div>
-
   <div id="controls">
-    <button id="startBtn">Start Camera & Detect</button>
-    <button id="stopBtn" class="secondary">Stop</button>
+    <button id="startBtn">開始相機與偵測</button>
+    <button id="stopBtn" class="secondary">停止</button>
   </div>
+  <div id="status">模型狀態：<span id="modelStatus">尚未載入</span></div>
+  <div style="max-width:720px;margin-top:8px;color:#333;font-size:14px;">提示：請將 face-api 模型權重放到 /models 資料夾，或指定全域變數 MODEL_URL 指向權重所在位置。</div>
 
-  <div id="status">Model status: <span id="modelStatus">not loaded</span></div>
-  <div class="info">Tip: make sure the '/models' folder with face-api models is available at the site root. See comments in the HTML for required model files.</div>
+<script>
+// 預設 MODEL_URL，可在頁面外透過 window.MODEL_URL 覆蓋（例如部署到其他位置）
+const DEFAULT_MODEL_URL = '/models';
+const MODEL_URL = (window.MODEL_URL && window.MODEL_URL.trim()) || DEFAULT_MODEL_URL;
 
-  <!--
-    Required model files (place them under /models):
-      - tiny_face_detector_model-weights_manifest.json (+ shard file)
-      - face_landmark_68_model-weights_manifest.json (+ shard files)
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const modelStatus = document.getElementById('modelStatus');
+let stream = null;
+let detectionInterval = null;
+const INPUT_SIZE = 320; // tiny face detector input size
 
-    You can download the models from the face-api.js repository or a CDN and put them in /models.
-  -->
-
-  <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
-  <script>
-    // Elements
-    const video = document.getElementById('video');
-    const overlay = document.getElementById('overlay');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const modelStatus = document.getElementById('modelStatus');
-
-    let stream = null;
-    let detectionInterval = null;
-
-    // Settings
-    const MODEL_URL = '/models'; // Ensure models are available here on your server
-    const INPUT_SIZE = 320; // tiny face detector input size
-
-    async function loadModels() {
-      modelStatus.textContent = 'loading...';
-      // We use Tiny Face Detector + 68-point landmark model for mouth landmarks (48-67)
-      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
-      modelStatus.textContent = 'loaded';
+async function loadModelsWithFallback() {
+  modelStatus.textContent = 'loading from ' + MODEL_URL + ' ...';
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL)
+    ]);
+    modelStatus.textContent = 'loaded from ' + MODEL_URL;
+    return;
+  } catch (err) {
+    console.warn('Load from', MODEL_URL, 'failed:', err);
+  }
+  if (MODEL_URL !== DEFAULT_MODEL_URL) {
+    modelStatus.textContent = 'fallback: loading from ' + DEFAULT_MODEL_URL + ' ...';
+    try {
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(DEFAULT_MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(DEFAULT_MODEL_URL)
+      ]);
+      modelStatus.textContent = 'loaded from ' + DEFAULT_MODEL_URL;
+      return;
+    } catch (err) {
+      console.error('Fallback load failed:', err);
     }
+  }
+  modelStatus.textContent = '載入失敗，請確認 /models 權重存在';
+}
 
-    async function startCamera() {
-      if (stream) return;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
-        video.srcObject = stream;
-        await video.play();
-        overlay.width = video.videoWidth;
-        overlay.height = video.videoHeight;
-      } catch (err) {
-        console.error('Could not start camera', err);
-        alert('Error accessing camera: ' + err.message);
-      }
-    }
+async function startCamera() {
+  if (stream) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+    video.srcObject = stream;
+    await video.play();
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+  } catch (err) {
+    alert('啟動相機失敗: ' + err.message);
+  }
+}
 
-    function stopCamera() {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        stream = null;
-      }
-      if (detectionInterval) {
-        clearInterval(detectionInterval);
-        detectionInterval = null;
-      }
-      const ctx = overlay.getContext('2d');
-      ctx && ctx.clearRect(0, 0, overlay.width, overlay.height);
-    }
+function stopCamera() {
+  if (stream) { stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  if (detectionInterval) { clearInterval(detectionInterval); detectionInterval = null; }
+  const ctx = overlay.getContext('2d'); ctx && ctx.clearRect(0,0,overlay.width, overlay.height);
+  modelStatus.textContent = 'stopped';
+}
 
-    function drawMouth(ctx, mouthPoints) {
-      if (!mouthPoints || mouthPoints.length === 0) return;
-      ctx.save();
-      // Outer lip (48-59)
-      ctx.strokeStyle = 'rgba(0,200,80,0.95)';
-      ctx.lineWidth = Math.max(2, overlay.width / 360);
-      ctx.beginPath();
-      mouthPoints.slice(0, 12).forEach((p, i) => {
-        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-      });
-      ctx.closePath();
-      ctx.stroke();
+function drawMouth(ctx, mouthPoints) {
+  if (!mouthPoints || mouthPoints.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,80,120,0.95)';
+  ctx.lineWidth = Math.max(2, overlay.width / 360);
+  ctx.beginPath();
+  mouthPoints.slice(0, 12).forEach((p, i)=> i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+  ctx.closePath(); ctx.fillStyle='rgba(255,80,120,0.25)'; ctx.fill(); ctx.stroke();
+  ctx.beginPath(); mouthPoints.slice(12).forEach((p,i)=> i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y)); ctx.closePath(); ctx.stroke();
+  ctx.restore();
+}
 
-      // Inner lip (60-67)
-      ctx.strokeStyle = 'rgba(255,80,80,0.95)';
-      ctx.beginPath();
-      mouthPoints.slice(12).forEach((p, i) => {
-        if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-      });
-      ctx.closePath();
-      ctx.stroke();
+function averagePoints(points){ const r = points.reduce((a,p)=>({x:a.x+p.x,y:a.y+p.y}),{x:0,y:0}); return {x:r.x/points.length,y:r.y/points.length}; }
+function distance(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function computeMouthOpenRatio(landmarks){ const inner = landmarks.slice(60,68); const top = averagePoints([inner[2], inner[3]]); const bottom = averagePoints([inner[6], inner[5]]); const vertical = distance(top,bottom); const leftEye = averagePoints(landmarks.slice(36,42)); const rightEye = averagePoints(landmarks.slice(42,48)); const interocular = distance(leftEye,rightEye); return vertical/(interocular||1); }
 
-      // Draw small dots for landmarks
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      mouthPoints.forEach(p => ctx.fillRect(p.x - 2, p.y - 2, 4, 4));
-      ctx.restore();
-    }
+async function detectLoop(){ if (!video || video.paused || video.ended) return; const options = new faceapi.TinyFaceDetectorOptions({ inputSize: INPUT_SIZE, scoreThreshold: 0.5 }); const result = await faceapi.detectSingleFace(video, options).withFaceLandmarks(true); const ctx = overlay.getContext('2d'); ctx.clearRect(0,0,overlay.width, overlay.height);
+  if (result && result.landmarks) {
+    const landmarks = result.landmarks.positions; const mouthPoints = landmarks.slice(48,68); drawMouth(ctx, mouthPoints); const openness = computeMouthOpenRatio(landmarks); ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.font='16px Arial'; ctx.fillStyle='white'; ctx.fillText('Mouth openness: ' + openness.toFixed(3), 10, 20); const speaking = openness > 0.035; ctx.fillStyle = speaking ? 'rgba(0,200,80,0.9)' : 'rgba(200,80,80,0.9)'; ctx.fillText('Speaking: ' + (speaking ? 'yes' : 'no'), 10, 40);
+  } else {
+    ctx.fillStyle='white'; ctx.font='16px Arial'; ctx.fillText('No face detected', 10, 20);
+  }
+}
 
-    // Compute mouth openness ratio using inner lip points (62 upper inner lip, 66 lower inner lip in 1-based indexing)
-    // For 0-based index: inner lip indexes start at 60..67, so upper: 62 -> idx 62? To be safe we use averaged points.
-    function computeMouthOpenRatio(landmarks) {
-      // Use inner lip top (points 62 & 63) and inner lip bottom (points 66 & 65)
-      // 68-point model indexing (0-based): inner lip points 60..67
-      const inner = landmarks.slice(60, 68);
-      const top = averagePoints([inner[2], inner[3]]); // approx top inner
-      const bottom = averagePoints([inner[6], inner[5]]); // approx bottom inner
-      const vertical = distance(top, bottom);
+async function startDetection(){ await loadModelsWithFallback(); await startCamera(); overlay.width = video.videoWidth; overlay.height = video.videoHeight; detectionInterval = setInterval(detectLoop, 100); }
 
-      // Normalize by interocular distance (distance between eyes) so ratio is invariant to scale
-      const leftEye = averagePoints(landmarks.slice(36, 42));
-      const rightEye = averagePoints(landmarks.slice(42, 48));
-      const interocular = distance(leftEye, rightEye);
-      const ratio = vertical / (interocular || 1);
-      return ratio;
-    }
+startBtn.addEventListener('click', ()=>{ startDetection().catch(e=>console.error(e)); });
+stopBtn.addEventListener('click', ()=>{ stopCamera(); });
+video.addEventListener('loadedmetadata', ()=>{ overlay.width = video.videoWidth; overlay.height = video.videoHeight; });
 
-    function averagePoints(points) {
-      const r = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 });
-      return { x: r.x / points.length, y: r.y / points.length };
-    }
-
-    function distance(a, b) {
-      return Math.hypot(a.x - b.x, a.y - b.y);
-    }
-
-    async function detectLoop() {
-      if (!video || video.paused || video.ended) return;
-      // use tiny face detector for speed
-      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: INPUT_SIZE, scoreThreshold: 0.5 });
-      const result = await faceapi.detectSingleFace(video, options).withFaceLandmarks(true);
-      const ctx = overlay.getContext('2d');
-      ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-      if (result && result.landmarks) {
-        const landmarks = result.landmarks.positions; // array of {x,y}
-        // draw mouth
-        const mouthPoints = landmarks.slice(48, 68); // 48..67
-        drawMouth(ctx, mouthPoints);
-
-        // compute openness
-        const openness = computeMouthOpenRatio(landmarks);
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = '18px Arial';
-        ctx.fillText('Mouth openness: ' + openness.toFixed(3), 10, 24);
-
-        // Simple speaking detection threshold (tune as needed)
-        const speaking = openness > 0.035;
-        ctx.fillStyle = speaking ? 'rgba(0,200,80,0.9)' : 'rgba(200,80,80,0.9)';
-        ctx.fillText('Speaking: ' + (speaking ? 'yes' : 'no'), 10, 48);
-      } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.font = '16px Arial';
-        ctx.fillText('No face detected', 10, 24);
-      }
-    }
-
-    async function startDetection() {
-      await loadModels();
-      await startCamera();
-      // Ensure overlay matches video size
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
-
-      // Run detection on an interval for stability and CPU control
-      detectionInterval = setInterval(detectLoop, 100); // 10 FPS
-    }
-
-    // Event listeners
-    startBtn.addEventListener('click', () => {
-      startDetection().catch(err => console.error(err));
-    });
-
-    stopBtn.addEventListener('click', () => {
-      stopCamera();
-      modelStatus.textContent = 'stopped';
-    });
-
-    // helper: adjust canvas when video dimensions change (e.g. mobile rotate)
-    video.addEventListener('loadedmetadata', () => {
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
-    });
-
-  </script>
+</script>
 </body>
 </html>
